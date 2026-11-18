@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.2
+
+- Put separate **Paste YouTube link** and **Import video file** buttons at the top of the Dashboard and My projects page.
+- Moved the full import choices above the dashboard statistics so they are visible sooner.
+
 ## v1.1.1
 
 - Made YouTube URL import available from both the Dashboard and My projects page.

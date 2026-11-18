@@ -39,7 +39,7 @@ PROCESS_LOCK = threading.Lock()
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-app = FastAPI(title="ClipForge AI", version="1.1.1")
+app = FastAPI(title="ClipForge AI", version="1.1.2")
 
 
 @app.on_event("startup")

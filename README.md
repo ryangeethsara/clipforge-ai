@@ -1,4 +1,4 @@
-# ClipForge AI v1.1.1
+# ClipForge AI v1.1.2
 
 Free, local-first video clipping software for turning long videos into short social clips. Start with a public YouTube link or upload a video from your computer. YouTube links use Gemini for cloud transcription; uploaded files use Whisper locally. ClipForge finds clip moments, lets you edit them, and exports MP4s with FFmpeg. Optional Pexels B-roll adds stock-video cutaways.
 
@@ -33,6 +33,8 @@ cd clipforge-ai
 Double-click `install.bat`, then `start.bat`. The app opens at [http://127.0.0.1:8765](http://127.0.0.1:8765). The installer adds the Python packages, including yt-dlp for YouTube import.
 
 ## Import from YouTube
+
+The Dashboard and **My projects** page both show two choices: paste a YouTube link or import a video file from your computer.
 
 1. Create an API key in [Google AI Studio](https://aistudio.google.com/apikey).
 2. In ClipForge, open **Settings → Gemini clip analysis**, paste the key, and save it.
