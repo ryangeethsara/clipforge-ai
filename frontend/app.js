@@ -68,7 +68,7 @@ function shell() {
 function dashboardPage() {
   const recent=state.projects.slice(0,6);
   const queue=state.projects.filter(p=>["processing","importing"].includes(p.status));
-  return `<div class="welcome"><div><div class="eyebrow">Your short-form studio</div><h1>Turn long videos into moments.</h1><p>Paste a YouTube link or upload a video, then shape and export your clips.</p></div><button class="button primary" data-action="browse-upload">${icon("upload")} Upload a video</button></div>
+  return `<div class="welcome"><div><div class="eyebrow">Your short-form studio</div><h1>Turn long videos into moments.</h1><p>Paste a YouTube link or upload a video, then shape and export your clips.</p></div><button class="button primary" data-action="focus-youtube-import">${icon("video")} Import from YouTube</button></div>
     <div class="stat-grid"><div class="stat-card"><div class="stat-info"><span>Videos in your library</span><strong>${state.stats.videos||0}</strong></div><div class="stat-icon">${icon("film")}</div></div><div class="stat-card"><div class="stat-info"><span>Clips created</span><strong>${state.stats.clips||0}</strong></div><div class="stat-icon">${icon("layers")}</div></div><div class="stat-card"><div class="stat-info"><span>Exports finished</span><strong>${state.stats.exports||0}</strong></div><div class="stat-icon">${icon("download")}</div></div></div>
     ${uploadPanel()}${queue.length?`<div class="section-head"><div><h2>Processing queue</h2><p class="sub">Source imports and clip analysis</p></div></div><div class="queue-list">${queue.map(p=>`<div class="queue-item" data-action="open-project" data-id="${p.id}"><div class="queue-thumb">${icon("sound")}</div><div class="queue-meta"><strong>${esc(p.name)}</strong><span>${esc(p.stage)}</span></div><div class="queue-progress"><i style="width:${p.progress}%"></i></div><span class="muted" style="font-size:9px">${p.progress}%</span></div>`).join("")}</div>`:""}<div class="section-head"><div><h2>Recent projects</h2><p class="sub">Pick up where you left off</p></div><button class="button small" data-page="projects">View library ${icon("arrow")}</button></div>
     ${recent.length?`<div class="project-grid">${recent.map(projectCard).join("")}</div>`:emptyState("film","Your project library is ready","Add a video to start finding clip-worthy moments.")}`;
@@ -76,7 +76,7 @@ function dashboardPage() {
 function uploadPanel() { return `<div class="upload-panel"><div class="youtube-import"><div class="upload-copy"><div class="upload-icon">${icon("video")}</div><div><strong>Start with a YouTube link</strong><p>Gemini transcribes the public video; ClipForge downloads the source to edit it locally.</p></div></div><div class="youtube-form-row"><div class="field"><label for="youtube-url">YouTube video URL</label><input id="youtube-url" type="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="url" /></div><button id="youtube-import-button" class="button primary" data-action="import-youtube">${icon("spark")} Import link</button></div><label class="rights-consent"><input id="rights-confirmed" type="checkbox" /><span>I own this video or have permission to download and edit it, and its use follows YouTube’s terms and applicable law.</span></label><p class="setting-help">Gemini needs a key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>. You can add it in Settings.</p></div><div class="upload-divider"><span>OR</span></div><div class="local-upload-panel" id="drop-zone"><div class="upload-inner"><div class="upload-copy"><div class="upload-icon">${icon("upload")}</div><div><strong>Upload a video from this computer</strong><p>MP4, MOV, MKV, AVI or WEBM · up to 4 GB</p></div></div><div class="upload-actions"><button class="button" data-action="browse-upload">Browse files</button><button class="button primary" data-action="browse-upload">${icon("upload")} Add videos</button></div></div><div class="upload-note">Local uploads use Whisper on this computer. Your source video stays in this project folder.</div></div></div>`; }
 function projectCard(p) { return `<article class="project-card" data-action="open-project" data-id="${esc(p.id)}"><div class="project-thumb"><img class="project-thumb-img" src="${p.thumbnail_url}" alt="Video thumbnail" loading="lazy" onerror="this.style.display='none'"/>${icon("film")}<span class="status-tag ${esc(p.status)}"><i></i>${esc(projectStatus(p))}</span><span class="duration-tag">${fmtTime(p.duration)}</span></div><div class="project-body"><div class="project-name" title="${esc(p.name)}">${esc(p.name)}</div><div class="project-desc"><span>${p.width} × ${p.height}</span><span>${esc(p.clip_count||0)} clips</span></div><div class="project-bottom"><span>${metaLine(p)}</span><span>${icon("arrow")}</span></div></div></article>`; }
 function emptyState(ico,title,desc) { return `<div class="empty-state"><div class="empty-mark">${icon(ico)}</div><strong>${esc(title)}</strong><p>${esc(desc)}</p></div>`; }
-function projectsPage() { return `<div class="welcome"><div><div class="eyebrow">Library</div><h1>My projects</h1><p>Your videos, clip selections, and saved edits.</p></div><button class="button primary" data-action="browse-upload">${icon("upload")} New project</button></div>${state.projects.length?`<div class="project-grid">${state.projects.map(projectCard).join("")}</div>`:emptyState("folder","No projects yet","Upload a long-form video to begin.")}`; }
+function projectsPage() { return `<div class="welcome"><div><div class="eyebrow">Library</div><h1>My projects</h1><p>Your videos, clip selections, and saved edits.</p></div><button class="button primary" data-action="focus-youtube-import">${icon("video")} Import from YouTube</button></div>${uploadPanel()}${state.projects.length?`<div class="section-head"><div><h2>My projects</h2><p class="sub">Your videos, clip selections, and saved edits.</p></div></div><div class="project-grid">${state.projects.map(projectCard).join("")}</div>`:emptyState("folder","No projects yet","Paste a YouTube link above or upload a video from your computer.")}`; }
 
 function processControls(p) {
   const cfg=p.settings||{};
@@ -195,6 +195,13 @@ async function importYouTube() {
   finally{if(button)button.disabled=false;}
 }
 
+function focusYouTubeImport() {
+  let input=$("#youtube-url");
+  if(!input){state.page="dashboard";state.clip=null;render();input=$("#youtube-url");}
+  input?.scrollIntoView({behavior:"smooth",block:"center"});
+  input?.focus({preventScroll:true});
+}
+
 async function analyze() {
   const preset=$("#duration-preset")?.value||"15-30";let [minimum,maximum]=preset==="custom"?[Number($("#minimum")?.value),Number($("#maximum")?.value)]:preset.split("-").map(Number);
   const count=Number($("#clip-count")?.value||5);const whisper_model=$("#project-whisper")?.value||state.settings.whisper_model||"small";
@@ -246,6 +253,7 @@ document.addEventListener("click",async event=>{
   if(el.hasAttribute("data-page")){state.page=el.dataset.page;state.clip=null;if(state.page==="exports")state.exportsLoaded=false;render();return;}
   const action=el.dataset.action;
   if(action==="browse-upload")$("#file-input")?.click();
+  if(action==="focus-youtube-import")focusYouTubeImport();
   if(action==="import-youtube")importYouTube();
   if(action==="open-project")openProject(el.dataset.id);
   if(action==="analyze")analyze();

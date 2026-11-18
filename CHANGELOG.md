@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.1
+
+- Made YouTube URL import available from both the Dashboard and My projects page.
+- Updated the main project buttons to focus the YouTube URL field.
+
 ## v1.1.0
 
 - Added YouTube-link import as the primary source workflow.
