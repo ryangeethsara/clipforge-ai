@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/settings.json
+projects/*
+exports/*
+temp/*
+!projects/.gitkeep
+!exports/.gitkeep
+!temp/.gitkeep
+
