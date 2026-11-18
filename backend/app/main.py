@@ -20,6 +20,7 @@ from .settings import load_settings, save_settings, public_settings
 from .services.pexels import search_videos, download_video
 from .services.pipeline import process_project
 from .services.render import render_clip
+from .services.youtube import normalize_youtube_url, download_youtube_video
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 LOG = logging.getLogger("clipforge")
@@ -38,7 +39,7 @@ PROCESS_LOCK = threading.Lock()
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-app = FastAPI(title="ClipForge AI", version="1.0.0")
+app = FastAPI(title="ClipForge AI", version="1.1.0")
 
 
 @app.on_event("startup")
@@ -47,7 +48,7 @@ def startup() -> None:
         directory.mkdir(parents=True, exist_ok=True)
     init_db()
     with connect() as db:
-        db.execute("UPDATE projects SET status='failed', stage='App closed before analysis finished · retry this project', error='The previous processing session stopped before completion.' WHERE status='processing'")
+        db.execute("UPDATE projects SET status='failed', stage='App closed before processing finished · retry this project', error='The previous processing session stopped before completion.' WHERE status IN ('processing','importing')")
         db.execute("UPDATE export_jobs SET status='failed', error='The previous export session stopped before completion.', finished_at=? WHERE status IN ('queued','rendering')", (_utc_now(),))
     for child in (ROOT / "temp").glob("render_*"):
         if child.is_dir():
@@ -69,6 +70,7 @@ def _project(project_id: str) -> dict:
                                "segment_count": len(transcript_data.get("segments", []))}
                               if isinstance(transcript_data, dict) else {"language": None, "segment_count": 0})
         data["settings"] = json.loads(data.pop("settings_json") or "{}")
+        data["source_ready"] = Path(data["source_path"]).is_file()
         clips = db.execute("SELECT * FROM clips WHERE project_id = ? AND active=1 ORDER BY score DESC, start ASC", (project_id,)).fetchall()
         clip_data = []
         for clip_row in clips:
@@ -226,6 +228,72 @@ async def upload_videos(files: list[UploadFile] = File(...)) -> dict:
     return {"projects": results}
 
 
+@app.post("/api/import-youtube")
+def import_youtube(payload: dict = Body(...)) -> dict:
+    if payload.get("rights_confirmed") is not True:
+        raise HTTPException(400, "Confirm that you have permission to download and edit this video.")
+    try:
+        youtube_url, video_id = normalize_youtube_url(str(payload.get("url", "")))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    project_id = uuid.uuid4().hex
+    folder = PROJECT_DIR / project_id
+    folder.mkdir(parents=True, exist_ok=False)
+    now = _utc_now()
+    with connect() as db:
+        db.execute("""INSERT INTO projects (id,name,source_name,source_path,youtube_url,status,progress,stage,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (project_id, f"YouTube {video_id}", "source.mp4", str(folder / "_pending_source"), youtube_url,
+             "importing", 1, "Preparing authorized YouTube download", now))
+    threading.Thread(target=_import_youtube_project, args=(project_id, youtube_url), daemon=True,
+                     name=f"clipforge-youtube-{project_id[:8]}").start()
+    return {"project": _project(project_id)}
+
+
+def _import_youtube_project(project_id: str, youtube_url: str) -> None:
+    folder = PROJECT_DIR / project_id
+    last_progress = {"value": -1, "percent": 0}
+
+    def on_progress(info: dict) -> None:
+        if info.get("status") != "downloading":
+            return
+        percent = None
+        if info.get("total_bytes"):
+            percent = 100 * info.get("downloaded_bytes", 0) / info["total_bytes"]
+        elif info.get("total_bytes_estimate"):
+            percent = 100 * info.get("downloaded_bytes", 0) / info["total_bytes_estimate"]
+        if percent is None:
+            return
+        percent = max(last_progress["percent"], min(100, percent))
+        value = max(1, min(19, int(1 + percent * .18)))
+        if value == last_progress["value"]:
+            return
+        last_progress["value"] = value
+        last_progress["percent"] = percent
+        with connect() as db:
+            db.execute("UPDATE projects SET progress=?,stage=? WHERE id=? AND status='importing'",
+                       (value, f"Downloading authorized YouTube video · {int(percent)}%", project_id))
+
+    try:
+        source, info = download_youtube_video(youtube_url, folder, on_progress)
+        metadata = _ffprobe(source)
+        size = source.stat().st_size
+        _make_thumbnail(source, folder / "thumbnail.jpg", metadata["duration"])
+        title = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", " ", str(info.get("title") or "YouTube video")).strip()[:120]
+        source_name = f"{title or 'YouTube video'}{source.suffix.lower()}"[:180]
+        with connect() as db:
+            db.execute("""UPDATE projects SET name=?,source_name=?,source_path=?,duration=?,width=?,height=?,file_size=?,
+                status='ready',progress=0,stage='YouTube source downloaded · ready to analyze',error=NULL WHERE id=?""",
+                (title or "YouTube video", source_name, str(source), metadata["duration"], metadata["width"],
+                 metadata["height"], size, project_id))
+    except Exception as exc:
+        LOG.exception("YouTube import failed for project %s", project_id)
+        with connect() as db:
+            db.execute("UPDATE projects SET status='failed',progress=0,stage='YouTube import failed',error=? WHERE id=?",
+                       (str(exc)[:1000], project_id))
+
+
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str) -> dict:
     return _project(project_id)
@@ -290,8 +358,10 @@ def process(project_id: str, payload: dict = Body(default={})) -> dict:
         row = db.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         if row is None:
             raise HTTPException(404, "Project not found")
-        if row["status"] == "processing":
+        if row["status"] in {"processing", "importing"}:
             return {"ok": True, "message": "Analysis is already running."}
+        if not Path(row["source_path"]).is_file():
+            raise HTTPException(400, "The source video is not ready yet. Wait for the import to finish or import it again.")
         minimum = int(payload.get("minimum", 15))
         maximum = int(payload.get("maximum", 30))
         count = int(payload.get("count", 5))

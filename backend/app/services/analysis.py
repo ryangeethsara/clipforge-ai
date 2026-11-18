@@ -71,6 +71,71 @@ def transcribe(video_path: str, model_size: str, cancel_event: threading.Event |
     return result, language
 
 
+def _timestamp_seconds(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return float(text)
+    pieces = text.split(":")
+    try:
+        numbers = [float(piece) for piece in pieces]
+    except ValueError as exc:
+        raise ValueError(f"Invalid timestamp: {text}") from exc
+    if len(numbers) == 2:
+        return numbers[0] * 60 + numbers[1]
+    if len(numbers) == 3:
+        return numbers[0] * 3600 + numbers[1] * 60 + numbers[2]
+    raise ValueError(f"Invalid timestamp: {text}")
+
+
+def gemini_transcribe_youtube(url: str, api_key: str, model: str,
+                              duration: float) -> tuple[list[dict[str, Any]], str]:
+    if not api_key:
+        raise RuntimeError("Add a Gemini API key in Settings to transcribe YouTube videos in the cloud.")
+    prompt = f"""Transcribe all clearly audible spoken words in this public YouTube video. Do not summarize, paraphrase, or invent words. Return JSON with exactly these keys: language (a short language name or code) and segments (an array of objects with numeric start and end values in seconds and the verbatim text). Break the transcript into natural speech phrases, usually one sentence per segment. Use the video's original timeline, start each segment when its words begin, and end it when they finish. The video is about {duration:.1f} seconds long. Keep every timestamp between 0 and {duration:.1f}. Include the full spoken transcript, not just highlights. If there is no intelligible speech, return an empty segments array."""
+    body = {
+        "contents": [{"parts": [
+            {"file_data": {"file_uri": url}},
+            {"text": prompt},
+        ]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1,
+                             "maxOutputTokens": 32768},
+    }
+    request = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        data=json.dumps(body).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        text = payload["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(text)
+        segments = []
+        for item in parsed.get("segments", []):
+            phrase = str(item.get("text", "")).strip()
+            if not phrase:
+                continue
+            start = _timestamp_seconds(item["start"])
+            end = _timestamp_seconds(item["end"])
+            if start < 0 or start >= duration or end <= start:
+                continue
+            end = min(end, duration)
+            segments.append({"start": round(start, 3), "end": round(end, 3), "text": phrase[:4000], "words": []})
+        segments.sort(key=lambda segment: (segment["start"], segment["end"]))
+        if not segments:
+            raise RuntimeError("Gemini returned no timestamped speech. Check the video audio and try another model.")
+        return segments, str(parsed.get("language") or "unknown")[:40]
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(f"Gemini transcription error ({exc.code}): {details}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Gemini transcription request failed: {exc}") from exc
+    except (AttributeError, KeyError, IndexError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Gemini returned an unreadable timestamped transcript: {exc}") from exc
+
+
 def _sentences(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     units: list[dict[str, Any]] = []
     for segment in segments:

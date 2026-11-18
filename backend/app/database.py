@@ -24,6 +24,7 @@ def init_db() -> None:
             name TEXT NOT NULL,
             source_name TEXT NOT NULL,
             source_path TEXT NOT NULL,
+            youtube_url TEXT,
             duration REAL NOT NULL DEFAULT 0,
             width INTEGER NOT NULL DEFAULT 0,
             height INTEGER NOT NULL DEFAULT 0,
@@ -92,6 +93,9 @@ def init_db() -> None:
         clip_columns = {row[1] for row in db.execute("PRAGMA table_info(clips)").fetchall()}
         if "active" not in clip_columns:
             db.execute("ALTER TABLE clips ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+        project_columns = {row[1] for row in db.execute("PRAGMA table_info(projects)").fetchall()}
+        if "youtube_url" not in project_columns:
+            db.execute("ALTER TABLE projects ADD COLUMN youtube_url TEXT")
 
 
 def row_json(row: sqlite3.Row | None) -> dict[str, Any] | None:

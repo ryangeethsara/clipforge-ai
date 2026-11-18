@@ -41,7 +41,7 @@ def search_videos(query: str, api_key: str, orientation: str = "portrait", per_p
 def download_video(video: dict, directory: Path) -> str:
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"pexels_{uuid.uuid4().hex[:12]}.mp4"
-    request = urllib.request.Request(video["download_url"], headers={"User-Agent": "ClipForgeAI/1.0"})
+    request = urllib.request.Request(video["download_url"], headers={"User-Agent": "ClipForgeAI/1.1"})
     try:
         with urllib.request.urlopen(request, timeout=90) as response, target.open("wb") as output:
             total = 0

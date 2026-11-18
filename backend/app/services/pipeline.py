@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..database import connect, ROOT
 from ..settings import load_settings
-from .analysis import transcribe, make_candidates, gemini_enrich
+from .analysis import transcribe, gemini_transcribe_youtube, make_candidates, gemini_enrich
 from .pexels import search_videos, download_video
 
 LOG = logging.getLogger("clipforge.pipeline")
@@ -31,14 +31,23 @@ def process_project(project_id: str, cancel_event: threading.Event | None = None
             project = dict(db.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
             settings = load_settings()
             config = json.loads(project.get("settings_json") or "{}")
-        _set_project(project_id, status="processing", progress=4, stage="Preparing local speech recognition", error=None)
-        segments, language = transcribe(project["source_path"], config.get("whisper_model", settings["whisper_model"]), cancel_event)
+        if project.get("youtube_url"):
+            _set_project(project_id, status="processing", progress=8, stage="Transcribing public YouTube video with Gemini", error=None)
+            segments, language = gemini_transcribe_youtube(
+                project["youtube_url"], settings["gemini_api_key"], settings["gemini_model"],
+                float(project["duration"]),
+            )
+        else:
+            _set_project(project_id, status="processing", progress=4, stage="Preparing local speech recognition", error=None)
+            segments, language = transcribe(project["source_path"], config.get("whisper_model", settings["whisper_model"]), cancel_event)
         if cancel_event and cancel_event.is_set():
             raise RuntimeError("Processing cancelled by user.")
         with connect() as db:
             db.execute("UPDATE projects SET transcript_json = ?, progress = 36, stage = ? WHERE id = ?",
                        (json.dumps({"language": language, "segments": segments}, ensure_ascii=False), "Finding complete moments", project_id))
         if not segments:
+            if project.get("youtube_url"):
+                raise RuntimeError("Gemini did not return speech for this YouTube video. Check that it has clear speech and retry.")
             raise RuntimeError("No speech was detected. Try another source or a larger Whisper model.")
         minimum = int(config.get("minimum", 15))
         maximum = int(config.get("maximum", 30))
