@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..database import connect, ROOT
 from ..settings import load_settings
-from .analysis import transcribe, gemini_transcribe_youtube, make_candidates, gemini_enrich
+from .analysis import gemini_transcribe_file, gemini_transcribe_youtube, make_candidates, gemini_enrich
 from .pexels import search_videos, download_video
 
 LOG = logging.getLogger("clipforge.pipeline")
@@ -38,17 +38,18 @@ def process_project(project_id: str, cancel_event: threading.Event | None = None
                 float(project["duration"]),
             )
         else:
-            _set_project(project_id, status="processing", progress=4, stage="Preparing local speech recognition", error=None)
-            segments, language = transcribe(project["source_path"], config.get("whisper_model", settings["whisper_model"]), cancel_event)
+            _set_project(project_id, status="processing", progress=4, stage="Uploading video for Gemini transcription", error=None)
+            segments, language = gemini_transcribe_file(
+                project["source_path"], settings["gemini_api_key"], settings["gemini_model"],
+                float(project["duration"]), cancel_event,
+            )
         if cancel_event and cancel_event.is_set():
             raise RuntimeError("Processing cancelled by user.")
         with connect() as db:
             db.execute("UPDATE projects SET transcript_json = ?, progress = 36, stage = ? WHERE id = ?",
                        (json.dumps({"language": language, "segments": segments}, ensure_ascii=False), "Finding complete moments", project_id))
         if not segments:
-            if project.get("youtube_url"):
-                raise RuntimeError("Gemini did not return speech for this YouTube video. Check that it has clear speech and retry.")
-            raise RuntimeError("No speech was detected. Try another source or a larger Whisper model.")
+            raise RuntimeError("Gemini did not return speech for this video. Check that it has clear speech and retry.")
         minimum = int(config.get("minimum", 15))
         maximum = int(config.get("maximum", 30))
         amount = max(1, min(30, int(config.get("count", 5))))

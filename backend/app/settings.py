@@ -8,7 +8,6 @@ SETTINGS_PATH = DATA / "settings.json"
 LOCK = Lock()
 DEFAULTS = {
     "gemini_model": "gemini-3.8-flash",
-    "whisper_model": "small",
     "auto_broll": False,
     "pexels_api_key": "",
     "gemini_api_key": "",
@@ -39,7 +38,6 @@ def public_settings(value: dict | None = None) -> dict:
     current = value or load_settings()
     return {
         "gemini_model": current["gemini_model"],
-        "whisper_model": current["whisper_model"],
         "auto_broll": bool(current["auto_broll"]),
         "gemini_configured": bool(current["gemini_api_key"]),
         "pexels_configured": bool(current["pexels_api_key"]),

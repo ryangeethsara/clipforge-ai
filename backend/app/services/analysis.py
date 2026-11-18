@@ -1,74 +1,14 @@
 import json
+import logging
+import mimetypes
 import re
-import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any
 
-import numpy as np
-
-
-def transcribe(video_path: str, model_size: str, cancel_event: threading.Event | None = None) -> tuple[list[dict[str, Any]], str]:
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError as exc:
-        raise RuntimeError("Local speech recognition is not installed. Run install.bat, then retry.") from exc
-
-    model_size = model_size if model_size in {"tiny", "base", "small", "medium", "large-v3"} else "small"
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    result: list[dict[str, Any]] = []
-    language = "unknown"
-    sample_rate = 16_000
-    chunk_seconds = 300
-    chunk_bytes = sample_rate * chunk_seconds * 4
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", video_path, "-vn", "-ac", "1", "-ar",
-               str(sample_rate), "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"]
-    try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    except FileNotFoundError as exc:
-        raise RuntimeError("FFmpeg was not found. Install FFmpeg and make sure it is available on PATH.") from exc
-    offset = 0.0
-    try:
-        assert process.stdout is not None
-        while True:
-            if cancel_event and cancel_event.is_set():
-                raise RuntimeError("Processing cancelled by user.")
-            raw = process.stdout.read(chunk_bytes)
-            if not raw:
-                break
-            # Stream short windows so a long source never becomes a large in-memory audio array.
-            usable = len(raw) - (len(raw) % 4)
-            audio = np.frombuffer(raw[:usable], dtype="<f4")
-            if not audio.size:
-                continue
-            segments, info = model.transcribe(audio, word_timestamps=True, vad_filter=True)
-            language = getattr(info, "language", language)
-            for seg in segments:
-                if cancel_event and cancel_event.is_set():
-                    raise RuntimeError("Processing cancelled by user.")
-                words = []
-                for word in getattr(seg, "words", None) or []:
-                    words.append({"start": round(offset + float(word.start), 3),
-                                  "end": round(offset + float(word.end), 3), "word": word.word})
-                result.append({"start": round(offset + float(seg.start), 3),
-                               "end": round(offset + float(seg.end), 3), "text": seg.text.strip(), "words": words})
-            offset += audio.size / sample_rate
-        if cancel_event and cancel_event.is_set():
-            raise RuntimeError("Processing cancelled by user.")
-        if process.wait(timeout=30) != 0:
-            raise RuntimeError("FFmpeg could not decode the source audio for transcription.")
-    except Exception:
-        if process.poll() is None:
-            process.kill()
-        raise
-    finally:
-        if process.stdout:
-            process.stdout.close()
-        if process.poll() is None:
-            process.kill()
-        process.wait()
-    return result, language
+LOG = logging.getLogger("clipforge.analysis")
 
 
 def _timestamp_seconds(value: Any) -> float:
@@ -89,10 +29,101 @@ def _timestamp_seconds(value: Any) -> float:
     raise ValueError(f"Invalid timestamp: {text}")
 
 
+def _parse_transcript(text: str, duration: float) -> tuple[list[dict[str, Any]], str]:
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("Gemini response must be a JSON object.")
+    segments = []
+    for item in parsed.get("segments", []):
+        if not isinstance(item, dict):
+            continue
+        phrase = str(item.get("text", "")).strip()
+        if not phrase:
+            continue
+        start = _timestamp_seconds(item["start"])
+        end = _timestamp_seconds(item["end"])
+        if start < 0 or start >= duration or end <= start:
+            continue
+        end = min(end, duration)
+        segments.append({"start": round(start, 3), "end": round(end, 3), "text": phrase[:4000], "words": []})
+    segments.sort(key=lambda segment: (segment["start"], segment["end"]))
+    if not segments:
+        raise RuntimeError("Gemini returned no timestamped speech. Check the video audio and try another model.")
+    return segments, str(parsed.get("language") or "unknown")[:40]
+
+
+def gemini_transcribe_file(video_path: str, api_key: str, model: str, duration: float,
+                           cancel_event: threading.Event | None = None) -> tuple[list[dict[str, Any]], str]:
+    if not api_key:
+        raise RuntimeError("Add a Gemini API key in Settings to transcribe videos in the cloud.")
+
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError("Gemini file upload support is not installed. Run install.bat, then retry.") from exc
+
+    prompt = f"""Transcribe all clearly audible spoken words in this video. Do not summarize, paraphrase, or invent words. Return JSON with exactly these keys: language (a short language name or code) and segments (an array of objects with numeric start and end values in seconds and the verbatim text). Break the transcript into natural speech phrases, usually one sentence per segment. Use the video's original timeline, start each segment when its words begin, and end it when they finish. The video is about {duration:.1f} seconds long. Keep every timestamp between 0 and {duration:.1f}. Include the full spoken transcript, not just highlights. If there is no intelligible speech, return an empty segments array."""
+    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=30 * 60 * 1000))
+    uploaded = None
+    try:
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("Processing cancelled by user.")
+        mime_type = mimetypes.guess_type(video_path)[0] or "video/mp4"
+        uploaded = client.files.upload(
+            file=video_path,
+            config=types.UploadFileConfig(mime_type=mime_type),
+        )
+        deadline = time.monotonic() + 600
+        while True:
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("Processing cancelled by user.")
+            state = getattr(uploaded, "state", None)
+            state_name = getattr(state, "name", str(state or "")).upper().rsplit(".", 1)[-1]
+            if state_name == "ACTIVE":
+                break
+            if state_name == "FAILED":
+                raise RuntimeError("Gemini could not prepare the uploaded video for transcription.")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Gemini took too long to prepare the uploaded video. Retry the analysis.")
+            time.sleep(2)
+            uploaded = client.files.get(name=uploaded.name)
+
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("Processing cancelled by user.")
+        response = client.models.generate_content(
+            model=model,
+            contents=[uploaded, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json", temperature=0.1, max_output_tokens=32768,
+            ),
+        )
+        if not response.text:
+            raise RuntimeError("Gemini returned an empty transcript response. Retry with another model.")
+        return _parse_transcript(response.text, duration)
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        message = getattr(exc, "message", None) or str(exc)
+        raise RuntimeError(f"Gemini file transcription failed: {message[:500]}") from exc
+    finally:
+        if uploaded is not None and getattr(uploaded, "name", None):
+            try:
+                client.files.delete(name=uploaded.name)
+            except Exception:
+                LOG.warning("Could not delete temporary Gemini upload %s", uploaded.name, exc_info=True)
+        close = getattr(client, "close", None)
+        if close:
+            try:
+                close()
+            except Exception:
+                LOG.debug("Could not close Gemini client cleanly", exc_info=True)
+
+
 def gemini_transcribe_youtube(url: str, api_key: str, model: str,
                               duration: float) -> tuple[list[dict[str, Any]], str]:
     if not api_key:
-        raise RuntimeError("Add a Gemini API key in Settings to transcribe YouTube videos in the cloud.")
+        raise RuntimeError("Add a Gemini API key in Settings to transcribe videos in the cloud.")
     prompt = f"""Transcribe all clearly audible spoken words in this public YouTube video. Do not summarize, paraphrase, or invent words. Return JSON with exactly these keys: language (a short language name or code) and segments (an array of objects with numeric start and end values in seconds and the verbatim text). Break the transcript into natural speech phrases, usually one sentence per segment. Use the video's original timeline, start each segment when its words begin, and end it when they finish. The video is about {duration:.1f} seconds long. Keep every timestamp between 0 and {duration:.1f}. Include the full spoken transcript, not just highlights. If there is no intelligible speech, return an empty segments array."""
     body = {
         "contents": [{"parts": [
@@ -111,22 +142,7 @@ def gemini_transcribe_youtube(url: str, api_key: str, model: str,
         with urllib.request.urlopen(request, timeout=300) as response:
             payload = json.loads(response.read().decode("utf-8"))
         text = payload["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = json.loads(text)
-        segments = []
-        for item in parsed.get("segments", []):
-            phrase = str(item.get("text", "")).strip()
-            if not phrase:
-                continue
-            start = _timestamp_seconds(item["start"])
-            end = _timestamp_seconds(item["end"])
-            if start < 0 or start >= duration or end <= start:
-                continue
-            end = min(end, duration)
-            segments.append({"start": round(start, 3), "end": round(end, 3), "text": phrase[:4000], "words": []})
-        segments.sort(key=lambda segment: (segment["start"], segment["end"]))
-        if not segments:
-            raise RuntimeError("Gemini returned no timestamped speech. Check the video audio and try another model.")
-        return segments, str(parsed.get("language") or "unknown")[:40]
+        return _parse_transcript(text, duration)
     except urllib.error.HTTPError as exc:
         details = exc.read().decode("utf-8", "replace")[:500]
         raise RuntimeError(f"Gemini transcription error ({exc.code}): {details}") from exc

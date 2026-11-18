@@ -27,7 +27,7 @@ LOG = logging.getLogger("clipforge")
 PROJECT_DIR = ROOT / "projects"
 EXPORT_DIR = ROOT / "exports"
 FRONTEND_DIR = ROOT / "frontend"
-MAX_UPLOAD = 4 * 1024 * 1024 * 1024
+MAX_UPLOAD = 2 * 1024 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 EXPORT_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="clip-export")
 BROLL_SEARCHES: dict[str, dict[str, Any]] = {}
@@ -39,7 +39,7 @@ PROCESS_LOCK = threading.Lock()
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-app = FastAPI(title="ClipForge AI", version="1.1.2")
+app = FastAPI(title="ClipForge AI", version="1.2.0")
 
 
 @app.on_event("startup")
@@ -158,11 +158,6 @@ def put_settings(payload: dict = Body(...)) -> dict:
         if not re.fullmatch(r"[A-Za-z0-9._-]{2,100}", model):
             raise HTTPException(400, "Gemini model name is invalid.")
         updates["gemini_model"] = model
-    if "whisper_model" in payload:
-        model = str(payload["whisper_model"])
-        if model not in {"tiny", "base", "small", "medium", "large-v3"}:
-            raise HTTPException(400, "Choose a supported Whisper model.")
-        updates["whisper_model"] = model
     if "auto_broll" in payload:
         updates["auto_broll"] = bool(payload["auto_broll"])
     return save_settings(updates)
@@ -207,7 +202,7 @@ async def upload_videos(files: list[UploadFile] = File(...)) -> dict:
                         break
                     size += len(chunk)
                     if size > MAX_UPLOAD:
-                        raise HTTPException(413, f"{safe_name}: maximum video size is 4 GB.")
+                        raise HTTPException(413, f"{safe_name}: maximum video size is 2 GB for Gemini upload.")
                     output.write(chunk)
             if size == 0:
                 raise HTTPException(400, f"{safe_name}: the file is empty.")
@@ -362,16 +357,15 @@ def process(project_id: str, payload: dict = Body(default={})) -> dict:
             return {"ok": True, "message": "Analysis is already running."}
         if not Path(row["source_path"]).is_file():
             raise HTTPException(400, "The source video is not ready yet. Wait for the import to finish or import it again.")
+        settings = load_settings()
+        if not settings["gemini_api_key"]:
+            raise HTTPException(400, "Add a Gemini API key in Settings before analyzing a video.")
         minimum = int(payload.get("minimum", 15))
         maximum = int(payload.get("maximum", 30))
         count = int(payload.get("count", 5))
         if minimum < 3 or maximum <= minimum or maximum > 180 or count < 1 or count > 30:
             raise HTTPException(400, "Choose a valid clip duration and clip count.")
-        settings = load_settings()
-        whisper_model = payload.get("whisper_model", settings["whisper_model"])
-        if whisper_model not in {"tiny", "base", "small", "medium", "large-v3"}:
-            raise HTTPException(400, "Choose a supported Whisper model.")
-        config = {"minimum": minimum, "maximum": maximum, "count": count, "whisper_model": whisper_model,
+        config = {"minimum": minimum, "maximum": maximum, "count": count,
                   "auto_broll": bool(payload.get("auto_broll", settings["auto_broll"]))}
         db.execute("UPDATE projects SET status='processing', progress=0, stage='Queued', error=NULL, settings_json=? WHERE id=?",
                    (json.dumps(config), project_id))
@@ -398,7 +392,7 @@ def cancel_processing(project_id: str) -> dict:
         raise HTTPException(409, "This project is not processing.")
     event.set()
     with connect() as db:
-        db.execute("UPDATE projects SET stage='Cancelling local analysis' WHERE id=?", (project_id,))
+        db.execute("UPDATE projects SET stage='Cancelling analysis' WHERE id=?", (project_id,))
     return {"ok": True, "message": "Cancellation requested."}
 
 
